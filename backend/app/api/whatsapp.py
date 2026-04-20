@@ -196,8 +196,8 @@ async def whatsapp_webhook(
     history.append(HumanMessage(content=body))
 
     try:
-        from app.services.llm_manager import llm_manager
-        llm = llm_manager.get_fallback_chain()
+        from app.services.bedrock_client import get_bedrock_llm
+        llm = get_bedrock_llm()
         response = llm.invoke(history)
 
         # Extract text content safely

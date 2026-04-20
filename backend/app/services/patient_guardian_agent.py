@@ -15,8 +15,8 @@ class PatientGuardianVoiceAgent:
         self.rx = prescription_info
         self.days_passed = days_passed
         
-        from app.services.llm_manager import llm_manager
-        self.llm = llm_manager.get_fallback_chain()
+        from app.services.bedrock_client import get_bedrock_llm
+        self.llm = get_bedrock_llm()
         self.llm_with_tools = self.llm.bind_tools([calculate_pill_count])
         
         self.system_prompt = f"""
