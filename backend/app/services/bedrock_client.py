@@ -124,3 +124,25 @@ def get_bedrock_llm():
 
     logger.info("🔄 AWS Bedrock key not found — using OpenRouter for voice/WhatsApp")
     return fallback_chain
+
+
+def get_bedrock_base():
+    """
+    Returns the RAW base model without fallback wrapper.
+    Required for bind_tools() which doesn't work on RunnableWithFallbacks.
+    Falls back to plain OpenRouter LLM if no Bedrock key.
+    """
+    from app.services.llm_manager import llm_manager
+
+    if _BEDROCK_API_KEY:
+        return BedrockBearerChat(
+            api_key=_BEDROCK_API_KEY,
+            region=_BEDROCK_REGION,
+            model_id=_MODEL_ID,
+            max_tokens=2048,
+            temperature=0.3,
+        )
+
+    # Return the first OpenRouter prescription client (supports tool binding)
+    return llm_manager.prescription_clients[0]
+
