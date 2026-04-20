@@ -13,7 +13,7 @@ DB_PATH = os.environ.get("PMC_DB_PATH", "app/data/pmc_cases.db")
 class IncrementalFaissIndexer:
     """
     Hybrid retrieval engine:
-      - Dense path : FAISS HNSW (all-MiniLM-L6-v2, 384-dim)
+      - Dense path : FAISS IndexFlatIP (pritamdeka/S-PubMedBert-MS-MARCO, 768-dim)
       - Sparse path: SQLite FTS5 with BM25 ranking (zero extra RAM)
 
     The old BM25 pickle approach required ~6 GB RAM on load — catastrophic
@@ -32,9 +32,9 @@ class IncrementalFaissIndexer:
         self.index_path = index_path
         self.db_path = db_path
 
-        # Semantic embedding model (CPU-safe, M1-optimised)
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
-        self.dimension = self.model.get_sentence_embedding_dimension()
+        # Medical-grade PubMedBert embedding model (768-dim, matches Colab-built index)
+        self.model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
+        self.dimension = self.model.get_embedding_dimension()
 
         self.index = None
         self._fts5_ready = False  # True once build_fts5_index.py has been run
