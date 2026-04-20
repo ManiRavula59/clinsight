@@ -14,7 +14,7 @@ BM25_PATH = "app/data/bm25_corpus.pkl"
 def build_indexes():
     print("Initializing embedding model onto Apple MPS (Metal Performance Shaders)...")
     # Using 'cpu' for safe fallback to avoid the M1 Unified Memory leak bug.
-    model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+    model = SentenceTransformer('pritamdeka/S-PubMedBert-MS-MARCO', device='cpu')
     embedding_dim = model.get_sentence_embedding_dimension()
     
     # Initialize FAISS index

@@ -41,7 +41,7 @@ class ColBERTReranker:
     Reranks a small candidate set (50 docs) — NOT for full corpus search.
     """
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "pritamdeka/S-PubMedBert-MS-MARCO"):
         print(f"[ColBERT] Loading tokenizer and model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
