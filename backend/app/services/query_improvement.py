@@ -93,14 +93,14 @@ class QueryImprovementService:
         
         prompt = (
             "You are a clinical informatics engine. Your task is to process a raw clinical query into a standardized form.\n"
-            "1. Expand all clinical abbreviations (e.g., 'yo' or 'y/o' to 'year old', 'MI' to 'myocardial infarction', 'HTN' to 'hypertension').\n"
-            "2. Keep the meaning exact but use standard medical terminology.\n"
-            "3. Identify which clinical entities are NEGATED (e.g., 'no fever' means fever is negated).\n"
+            "1. Expand all clinical abbreviations (e.g., 'yo' to 'year old', 'MI' to 'myocardial infarction').\n"
+            "2. Identify which clinical entities are NEGATED (e.g., 'no fever' means fever is negated).\n"
+            "3. **CRITICAL**: Completely REMOVE the negated terms from the `normalized_text` and `keywords`. If the patient has 'no chest pain', do NOT include 'chest pain' in the normalized strings to prevent false-positive vector matching.\n"
             "Output ONLY a JSON object with this exact structure:\n"
             "{\n"
-            "  \"normalized_text\": \"The full expanded sentence\",\n"
+            "  \"normalized_text\": \"The positive symptoms only, expanded\",\n"
             "  \"entities\": [{\"text\": \"entity\", \"negated\": true/false, \"type\": \"symptom/diagnosis\"}],\n"
-            "  \"keywords\": \"A clean space-separated string of the most important clinical keywords, expanded\"\n"
+            "  \"keywords\": \"A clean space-separated string of the positive clinical keywords only\"\n"
             "}"
         )
 

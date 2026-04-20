@@ -5,6 +5,8 @@ from typing import AsyncGenerator
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from app.services.privacy_shield import privacy_shield
+from app.services.clinical_planner import clinical_planner
+from app.services.guideline_rag import guideline_rag
 from app.services.query_improvement import query_improver
 from app.services.knowledge_graph import kg_structurer
 from app.services.colbert_reranker import ColBERTReranker
@@ -69,24 +71,25 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
         yield f"data: {json.dumps({'type': 'trace', 'content': 'Checking for PII (Presidio)...'})}\n\n"
         safe_query = privacy_shield.redact_pii(latest_query)
         
-        # Step 2: Contextual Intent Router (Bypass RAG for chit-chat/follow-ups)
-        is_followup = False
-        follow_words = ["what", "how", "she", "he", "it", "they", "if", "why", "can", "could", "should", "would"]
-        latest_lower = latest_query.lower()
-        if len(messages) > 1 and (len(latest_lower.split()) < 15 or any(latest_lower.startswith(w) for w in follow_words)):
-            is_followup = True
-
+        # Step 2: Clinical Planner LLM
+        yield f"data: {json.dumps({'type': 'trace', 'content': 'Clinical Planner LLM: Generating differential diagnoses & routing...'})}\n\n"
+        plan = clinical_planner.route_query(safe_query)
+        
         retrieved_context = "No direct case matches found."
         matched_cases = []
         matched_case_uids = []  # patient_uids for PPR metrics
         confidence_pct = 85  # Default fallback
         
-        if is_followup:
-            yield f"data: {json.dumps({'type': 'trace', 'content': 'Conversational follow-up detected. Bypassing FAISS retrieval...'})}\n\n"
+        if plan.route == "guideline":
+            yield f"data: {json.dumps({'type': 'trace', 'content': 'Routing to Guideline RAG...'})}\n\n"
+            retrieved_context = await guideline_rag.get_guidelines(safe_query)
+            confidence_pct = 95
+        elif plan.route == "followup":
+            yield f"data: {json.dumps({'type': 'trace', 'content': 'Conversational follow-up detected. Bypassing RAG...'})}\n\n"
         else:
-            # Step 2b: Clinical Query Improvement (NER & Normalization)
-            yield f"data: {json.dumps({'type': 'trace', 'content': 'Extracting clinical NER & formulating dense intent...'})}\n\n"
-            improvement = query_improver.process(safe_query)
+            # Step 2b: Clinical Query Improvement (NER & Negation)
+            yield f"data: {json.dumps({'type': 'trace', 'content': 'Clinical Parser: Extracting NER & removing negated terms...'})}\n\n"
+            improvement = query_improver.process(plan.search_refinements)
             
             # Step 2c: Knowledge Graph Structuring
             yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Mapping to UMLS Ontology & Knowledge Graph...'})}\n\n"
@@ -104,13 +107,27 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                 # Stage 1: Fast Hybrid Recall (Dense + Sparse)
                 # We use the massive KG-augmented ontology query for FAISS!
                 
+                import sqlite3
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("PRAGMA cache_size = -64000;")
+                conn.execute("PRAGMA temp_store = MEMORY;")
+                conn.execute("PRAGMA mmap_size = 3000000000;")
+                cursor = conn.cursor()
+                
                 # 1. FAISS Dense Hits
                 dense_indices = indexer.search(search_query, top_k=100)
                 
-                # 2. BM25 Sparse Hits (Using LLM-Sanitized Keyword Query)
-                sparse_indices = indexer.search_bm25(improvement.fts5_query, top_k=100)
+                # 2. SQLite FTS5 Lexical Retrieval
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: Executing SQLite disk search...'})}\n\n"
+                try:
+                    cursor.execute("SELECT id FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
+                    sparse_indices = [row[0] for row in cursor.fetchall()]
+                except Exception as e:
+                    print("FTS5 query failed, falling back to empty sparse list:", e)
+                    sparse_indices = []
                 
                 # 3. Reciprocal Rank Fusion (RRF)
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'RRF Fusion: Parameter-free merging of FAISS & FTS5...'})}\n\n"
                 # Standard RRF Formula: Score = 1 / (60 + rank)
                 rrf_scores = {}
                 for rank, doc_idx in enumerate(dense_indices):
@@ -123,15 +140,6 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                 top_k_indices = [doc_idx for doc_idx, score in sorted_rrf[:50]]
                 
                 # Rehydrate context from SQLite database
-                import sqlite3
-                conn = sqlite3.connect(DB_PATH)
-                
-                # Memory PRAGMAs for massive SQLite read acceleration
-                conn.execute("PRAGMA cache_size = -64000;")
-                conn.execute("PRAGMA temp_store = MEMORY;")
-                conn.execute("PRAGMA mmap_size = 3000000000;")
-                
-                cursor = conn.cursor()
                 
                 # Pass integer indices to SQLite to fetch text AND patient_uid
                 placeholders = ','.join('?' for _ in top_k_indices)
@@ -261,6 +269,15 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
             f"- Ground Truth Source: PMC-Patients similar_patients dataset "
             f"(104,402 / 250,294 cases have labelled ground truth)\n"
         )
+        
+        # Confidence Gate Routing
+        if plan.route == "retrieval":
+            if confidence_pct < 70:
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'⚠️ Confidence Gate: Low ({confidence_pct}%). Looping back to Guideline RAG for safety.'})}\n\n"
+                guideline_fallback = await guideline_rag.get_guidelines(safe_query)
+                retrieved_context += f"\\n\\n--- SAFETY FALLBACK: OFFICIAL GUIDELINES ---\\n{guideline_fallback}"
+            else:
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'Confidence Gate: Passed ({confidence_pct}%). Proceeding to Final Synthesis.'})}\n\n"
         
         # Step 4: Grounded Explanation using LLM Racing
         sys_msg_content = (
