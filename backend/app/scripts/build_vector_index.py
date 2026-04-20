@@ -37,8 +37,8 @@ def build_indexes():
     total_docs = cursor.fetchone()[0]
     print(f"Total documents to process: {total_docs}")
     
-    # We will process in chunks to keep memory usage safe during vectorization
-    chunk_size = 5000 
+    # We will process in smaller chunks so the progress bar updates faster
+    chunk_size = 500 
     
     import torch
     import gc
@@ -62,7 +62,7 @@ def build_indexes():
         
         # 1. FAISS DENSE EMBEDDING (Hardware Accelerated)
         # Using batch_size inside encode to prevent MPS memory spillage
-        embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        embeddings = model.encode(texts, batch_size=32, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=True)
         index.add(embeddings)
         
         # 1b. Checkpoint the Index exactly so progress is NEVER lost!
