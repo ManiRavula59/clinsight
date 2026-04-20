@@ -63,6 +63,8 @@ def extraction_node(state: ClinsightState) -> Dict:
         timings: list[str] = Field(description="When to take (e.g., 1x daily after food)")
         preferred_language: str = Field(description="Language for follow-up (English, Telugu, etc.)")
         patient_name: str = Field(description="Name of the patient", default="Unknown Patient")
+        age: int | None = Field(description="Patient age in years if mentioned", default=None)
+        weight_kg: float | None = Field(description="Patient weight in kilograms if mentioned (e.g. 70 kg)", default=None)
         allergies: list[str] = Field(description="Any allergies mentioned by the user", default=[])
         patient_history: list[str] = Field(description="Medical conditions or history mentioned", default=[])
         active_medications: list[str] = Field(description="Existing medications the patient is already taking", default=[])
@@ -122,6 +124,8 @@ def confirmation_checker_node(state: ClinsightState) -> Dict:
             # Fallback to dynamic profile from the extracted chat data
             profile = {
                 "name": patient_name,
+                "age": rx_data.get("age"),           # Pillar 6: Age-Based Dosing
+                "weight_kg": rx_data.get("weight_kg"),  # Pillar 7: Weight-Based Dosing
                 "allergies": [{"allergen": a} for a in rx_data.get("allergies", [])],
                 "active_medications": [{"name": m} for m in rx_data.get("active_medications", [])],
                 "lab_results": [{"test_name": "Condition", "value": h} for h in rx_data.get("patient_history", [])]
@@ -130,23 +134,44 @@ def confirmation_checker_node(state: ClinsightState) -> Dict:
         guardian = SafetyGuardian()
         report = guardian.validate_prescription(profile, rx_data)
 
-        if report.get("is_safe", False):
-            msg = AIMessage(content=f"✅ **Prescription Guardian Passed**\nNo allergy conflicts or severe drug interactions found for {profile['name']}.\n\n*Would you like to schedule the Conversational Follow-Up Agent? (Reply 'setup follow up')*")
-            return {
-                "prescription_confirmed": True,
-                "intent": "followup_setup",
-                "messages": [msg]
-            }
-        else:
-            alerts_json = report.get("alerts", [])
-            alerts_text = "\n".join([f"- 🚨 **{a.get('pillar', 'Issue')}**: {a.get('description', '')} (Severity: {a.get('severity', 'High')})" for a in alerts_json])
-            msg = AIMessage(content=f"🚫 **PRE-PRESCRIPTION SAFETY INTERVENTION** 🚫\n\n**CRITICAL CONFLICTS DETECTED FOR {profile['name'].upper()}:**\n{alerts_text}\n\n**Guardian Reasoning:**\n{report.get('reasoning', '')}\n\nPrescription has been **BLOCKED**. Please type your modified prescription to override.")
-            return {
-                "extracted_prescription": None,
-                "prescription_confirmed": False,
-                "intent": "chat",
-                "messages": [msg]
-            }
+        outcome = report.get("outcome", "BLOCKED" if not report.get("is_safe", True) else "SAFE")
+        alerts_json = report.get("alerts", [])
+
+        if outcome == "SAFE":
+            msg = AIMessage(content=(
+                f"✅ **Prescription Guardian: SAFE**\n\n"
+                f"No conflicts found for **{profile['name']}**. Prescription is clinically appropriate.\n\n"
+                f"*Would you like to schedule a Conversational Follow-Up call? (Reply 'setup follow up')*"
+            ))
+            return {"prescription_confirmed": True, "intent": "followup_setup", "messages": [msg]}
+
+        elif outcome == "WARNING":
+            alerts_text = "\n".join([
+                f"- ⚠️ **{a.get('pillar', 'Note')}**: {a.get('description', '')} (Severity: {a.get('severity', 'Low')})"
+                for a in alerts_json
+            ])
+            msg = AIMessage(content=(
+                f"⚠️ **Prescription Guardian: WARNING**\n\n"
+                f"Prescription for **{profile['name']}** can proceed, but please review:\n\n"
+                f"{alerts_text}\n\n"
+                f"**Guardian Reasoning:** {report.get('reasoning', '')}\n\n"
+                f"*Prescription approved with caution. Reply 'setup follow up' to schedule a monitoring call.*"
+            ))
+            return {"prescription_confirmed": True, "intent": "followup_setup", "messages": [msg]}
+
+        else:  # BLOCKED
+            alerts_text = "\n".join([
+                f"- 🚨 **{a.get('pillar', 'Issue')}**: {a.get('description', '')} (Severity: {a.get('severity', 'High')})"
+                for a in alerts_json
+            ])
+            msg = AIMessage(content=(
+                f"🚫 **PRE-PRESCRIPTION SAFETY INTERVENTION — BLOCKED**\n\n"
+                f"**CRITICAL CONFLICTS FOR {profile['name'].upper()}:**\n\n"
+                f"{alerts_text}\n\n"
+                f"**Guardian Reasoning:** {report.get('reasoning', '')}\n\n"
+                f"Prescription **BLOCKED**. Please revise and re-upload."
+            ))
+            return {"extracted_prescription": None, "prescription_confirmed": False, "intent": "chat", "messages": [msg]}
     else:
         return {
             "extracted_prescription": None,
@@ -180,7 +205,8 @@ def patient_registration_node(state: ClinsightState) -> Dict:
 
     class PatientRegistration(BaseModel):
         patient_name: str = Field(description="Name of the patient")
-        age: int = Field(description="Age of the patient", default=0)
+        age: int = Field(description="Age of the patient in years", default=0)
+        weight_kg: float | None = Field(description="Patient weight in kilograms (e.g. 72.5 kg) if mentioned", default=None)
         gender: str = Field(description="Gender of the patient", default="Unknown")
         allergies: list[str] = Field(description="Any allergies mentioned", default=[])
         patient_history: list[str] = Field(description="Medical conditions or history", default=[])
@@ -203,18 +229,22 @@ def patient_registration_node(state: ClinsightState) -> Dict:
         
         if row:
             patient_id = row[0]
-            # Update Patient
-            cursor.execute("UPDATE patients SET age=?, chronic_conditions=? WHERE id=?", 
-                           (data.age, ", ".join(data.patient_history), patient_id))
+            # Update Patient (including weight_kg)
+            cursor.execute(
+                "UPDATE patients SET age=?, weight_kg=?, chronic_conditions=? WHERE id=?",
+                (data.age, data.weight_kg, ", ".join(data.patient_history), patient_id)
+            )
             # Delete old records to replace them
             cursor.execute("DELETE FROM allergies WHERE patient_id=?", (patient_id,))
             cursor.execute("DELETE FROM active_medications WHERE patient_id=?", (patient_id,))
             cursor.execute("DELETE FROM lab_results WHERE patient_id=?", (patient_id,))
             msg_prefix = f"🔄 **Patient Profile Updated**\n\nPatient **{data.patient_name}** (ID: {patient_id}) already existed in the EMR. Their profile has been successfully updated with the latest details."
         else:
-            # Insert Patient
-            cursor.execute("INSERT INTO patients (name, age, preferred_language, chronic_conditions) VALUES (?, ?, ?, ?)",
-                           (data.patient_name, data.age, "English", ", ".join(data.patient_history)))
+            # Insert Patient (including weight_kg)
+            cursor.execute(
+                "INSERT INTO patients (name, age, weight_kg, preferred_language, chronic_conditions) VALUES (?, ?, ?, ?, ?)",
+                (data.patient_name, data.age, data.weight_kg, "English", ", ".join(data.patient_history))
+            )
             patient_id = cursor.lastrowid
             msg_prefix = f"🏥 **Patient Registered Successfully**\n\nPatient **{data.patient_name}** (ID: {patient_id}) has been permanently saved to the Clinsight EMR Database."
         
