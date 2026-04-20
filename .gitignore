@@ -1,0 +1,64 @@
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Virtual Environment ───────────────────────────────────────────────────────
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+*.key
+
+# ─── Large Data Files (>100MB — excluded from GitHub) ─────────────────────────
+# These are generated locally by running the build scripts
+backend/app/data/pmc_cases.db
+backend/app/data/bm25_tokens.jsonl
+backend/app/data/bm25_corpus.pkl
+backend/app/data/disease_index.faiss
+
+# ─── Runtime Session Data (auto-generated, not source code) ───────────────────
+backend/app/data/call_histories/
+backend/app/data/whatsapp_sessions/
+backend/app/data/ppr_eval_results*.jsonl
+backend/app/data/ppr_eval_results*.json
+
+# ─── Small data files to KEEP in repo ─────────────────────────────────────────
+# backend/app/data/patients.db       ← KEEP (small demo DB)
+# backend/app/data/mock_cases.json   ← KEEP (demo data)
+# backend/app/data/pmc_cases.json    ← KEEP (small sample)
+# backend/app/data/clinical_index.*  ← KEEP (small index)
+# backend/app/data/feedback_loop.json← KEEP
+
+# ─── Node / Frontend ──────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+*.tsbuildinfo
+
+# ─── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/

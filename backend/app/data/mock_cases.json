@@ -1,0 +1,6 @@
+[
+  {"id": "c1", "text": "65yo male, severe chest pain radiating to the left arm. Elevated troponin levels. History of hypertension."},
+  {"id": "c2", "text": "30yo female, sudden onset of temporal headache, visual field loss. No prior medical history."},
+  {"id": "c3", "text": "12yo male, fever, sore throat, swollen lymph nodes. Strep test positive."},
+  {"id": "c4", "text": "55yo male, severe chest pain, elevated troponin, no fever. Smoker, family history of coronary artery disease."}
+]

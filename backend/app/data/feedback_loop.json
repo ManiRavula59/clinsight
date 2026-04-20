@@ -1,0 +1,12 @@
+[
+    {
+        "query": "Patient with sudden visual field loss and temporal headache",
+        "case_id": "Doc_1",
+        "is_relevant": true
+    },
+    {
+        "query": "Young patient with sudden visual loss and pain",
+        "case_id": "Doc_1",
+        "is_relevant": false
+    }
+]
