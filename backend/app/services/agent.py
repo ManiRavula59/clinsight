@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from app.services.privacy_shield import privacy_shield
 from app.services.query_improvement import query_improver
+from app.services.knowledge_graph import kg_structurer
 from app.services.colbert_reranker import ColBERTReranker
 from app.scripts.incremental_indexer import IncrementalFaissIndexer
 from sentence_transformers import CrossEncoder
@@ -87,12 +88,21 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
             yield f"data: {json.dumps({'type': 'trace', 'content': 'Extracting clinical NER & formulating dense intent...'})}\n\n"
             improvement = query_improver.process(safe_query)
             
+            # Step 2c: Knowledge Graph Structuring
+            yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Mapping to UMLS Ontology & Knowledge Graph...'})}\n\n"
+            kg = kg_structurer.build_graph(improvement.normalized_text)
+            
+            # Extract augmented search query from the Graph
+            search_query = kg.expanded_search_query if kg else improvement.normalized_text
+            if kg and kg.contraindications:
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'⚠️ KG Detected Contraindications: {len(kg.contraindications)}'})}\n\n"
+            
             # Step 3: Retrieval via Faiss
             if indexer and indexer.index.ntotal > 0:
                 yield f"data: {json.dumps({'type': 'trace', 'content': f'Querying FAISS chunked index (n={indexer.index.ntotal})...'})}\n\n"
                 
                 # Stage 1: Fast Hybrid Recall (Dense + Sparse)
-                search_query = improvement.normalized_text
+                # We use the massive KG-augmented ontology query for FAISS!
                 
                 # 1. FAISS Dense Hits
                 dense_indices = indexer.search(search_query, top_k=100)
