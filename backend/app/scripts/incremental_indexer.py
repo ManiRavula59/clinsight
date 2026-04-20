@@ -34,7 +34,7 @@ class IncrementalFaissIndexer:
 
         # Medical-grade PubMedBert embedding model (768-dim, matches Colab-built index)
         self.model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
-        self.dimension = self.model.get_embedding_dimension()
+        self.dimension = self.model.get_sentence_embedding_dimension()
 
         self.index = None
         self._fts5_ready = False  # True once build_fts5_index.py has been run

@@ -272,28 +272,9 @@ def get_final_top_k(
     candidate_uids = [uid for uid, _ in candidate_list]
     candidate_texts = [text for _, text in candidate_list]
 
-    # Stage 4: ColBERT Rerank (→ top 20)
-    if colbert_reranker is not None:
-        colbert_results = colbert_reranker.rerank(query_text, candidate_texts, top_k=20)
-        # Map back to uids
-        text_to_uid = {}
-        for uid, text in candidate_list:
-            text_to_uid[text] = uid
-        colbert_uids = [text_to_uid[t] for t, _ in colbert_results if t in text_to_uid]
-        colbert_texts = [t for t, _ in colbert_results if t in text_to_uid]
-    else:
-        colbert_uids = candidate_uids[:20]
-        colbert_texts = candidate_texts[:20]
-
-    # Stage 5: Cross-Encoder Rerank (→ top K)
-    if cross_encoder is not None and colbert_texts:
-        cross_inp = [[query_text, doc] for doc in colbert_texts]
-        scores = cross_encoder.predict(cross_inp)
-        scored = list(zip(colbert_uids, scores))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return [uid for uid, _ in scored[:k]]
-    else:
-        return colbert_uids[:k]
+    # Stage 4: Return Hybrid candidates directly (Base Paper approach)
+    # The base paper then applies LLM Reranking on these top K. We just return the Hybrid Top K.
+    return candidate_uids[:k]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -406,18 +387,8 @@ def run_batch_evaluation(num_queries: int = 500, seed: int = 42, output_path: st
 
     indexer = IncrementalFaissIndexer()
 
-    try:
-        from app.services.colbert_reranker import ColBERTReranker
-        print("  ColBERT explicitly disabled for batch benchmarking to prevent macOS PyTorch deadlocks.")
-        colbert = None
-    except Exception as e:
-        colbert = None
-
-    try:
-        cross_enc = CE("cross-encoder/ms-marco-MiniLM-L-6-v2")
-    except Exception as e:
-        print(f"  Cross-encoder load failed ({e})")
-        cross_enc = None
+    colbert = None
+    cross_enc = None
 
     # ── Build lookup tables ──────────────────────────────────────────────
     print("[2/5] Building UID ↔ FAISS-ID lookups...")
@@ -450,7 +421,7 @@ def run_batch_evaluation(num_queries: int = 500, seed: int = 42, output_path: st
     print(f"  Selected for evaluation: {len(selected)}")
 
     # ── Run evaluation ───────────────────────────────────────────────────
-    print(f"[4/5] Evaluating {len(selected)} queries (FAISS vs Full pipeline)...")
+    print(f"[4/5] Evaluating {len(selected)} queries (FAISS vs Hybrid BasePaper)...")
     faiss_results = []
     final_results = []
     per_query_log = []
@@ -471,7 +442,7 @@ def run_batch_evaluation(num_queries: int = 500, seed: int = 42, output_path: st
         faiss_m = compute_all_metrics(faiss_uids, rel_map, K)
         faiss_results.append(faiss_m)
 
-        # Stage B: Full pipeline (FAISS + FTS5 + ColBERT + Cross-Encoder)
+        # Stage B: Base Paper Hybrid (FAISS + FTS5 RRF)
         final_uids = get_final_top_k(
             indexer, cross_enc, colbert,
             q_text, q_uid, K,
@@ -505,7 +476,7 @@ def run_batch_evaluation(num_queries: int = 500, seed: int = 42, output_path: st
     print("\n" + "=" * 70)
     print(f"  RESULTS: {len(selected)} queries | K=10 | Seed={seed}")
     print("=" * 70)
-    print(f"{'Metric':<16} {'FAISS':>10} {'Final':>10} {'Δ (gain)':>10}")
+    print(f"{'Metric':<16} {'FAISS':>10} {'Hybrid(BP)':>10} {'Δ (gain)':>10}")
     print("-" * 50)
     for key in ["recall@10", "precision@10", "ndcg@10", "map@10", "mrr@10", "dcg@10"]:
         f_val = faiss_agg[key]

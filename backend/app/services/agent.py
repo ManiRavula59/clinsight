@@ -120,7 +120,7 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                 # 2. SQLite FTS5 Lexical Retrieval
                 yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: Executing SQLite disk search...'})}\n\n"
                 try:
-                    cursor.execute("SELECT id FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
+                    cursor.execute("SELECT rowid FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
                     sparse_indices = [row[0] for row in cursor.fetchall()]
                 except Exception as e:
                     print("FTS5 query failed, falling back to empty sparse list:", e)

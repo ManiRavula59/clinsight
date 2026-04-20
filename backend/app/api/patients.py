@@ -20,8 +20,12 @@ async def fetch_patient(patient_id: int):
 @router.post("/{patient_id}/validate-prescription")
 async def validate_rx(patient_id: int, request: PrescriptionRequest):
     """
-    Submits a JSON prescription payload to the Safety Guardian 
-    for the 5-pillar safety validation against the specific patient.
+    Submits a JSON prescription payload to the Safety Guardian for
+    7-pillar safety validation against the specific patient:
+    1. Allergy Conflicts  2. Drug-Drug Interactions  3. Organ Function
+    4. Therapeutic Duplication  5. QT Prolongation
+    6. Age-Based Dosing (Beers Criteria for elderly, paediatric weight-calc flag)
+    7. Weight-Based Dosing (mg/kg range check using patient weight_kg)
     """
     profile = get_patient_profile(patient_id)
     if not profile:
