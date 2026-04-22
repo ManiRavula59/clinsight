@@ -1,11 +1,13 @@
 """
 Google Colab Fine-Tuning Script for S-PubMedBert (Bi-Encoder)
+Compatible with sentence-transformers v3+
 -------------------------------------------------------------
 Instructions for Google Colab:
-1. Upload your `pmc_cases.db` file to the Colab environment.
-2. Install required libraries: `!pip install sentence-transformers torch`
-3. Run this script: `!python finetune_pubmedbert_colab.py`
-4. Once completed, download the `finetuned-pubmedbert` folder and place it in your Clinsight backend.
+1. Upload `pmc_cases.db` to Colab (Files panel on the left)
+2. Run Cell 1:  !pip install -q sentence-transformers datasets torch
+3. Run Cell 2:  paste this entire script and run
+4. After training, download the `finetuned-pubmedbert` folder
+5. Place it in your Clinsight backend directory
 """
 
 import sqlite3
@@ -13,84 +15,85 @@ import json
 import logging
 import math
 import random
-from torch.utils.data import DataLoader
-from sentence_transformers import SentenceTransformer, InputExample, losses
-from sentence_transformers.evaluation import InformationRetrievalEvaluator
+import os
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+# ── New sentence-transformers v3 API imports (no deprecation warnings) ──
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.losses import MultipleNegativesRankingLoss
+from sentence_transformers.evaluation import InformationRetrievalEvaluator
+from sentence_transformers.trainer import SentenceTransformerTrainer
+from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+from datasets import Dataset
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Configuration ---
-DB_PATH = "pmc_cases.db"  # Make sure this is uploaded to Colab
-MODEL_NAME = "pritamdeka/S-PubMedBert-MS-MARCO"
-OUTPUT_DIR = "./finetuned-pubmedbert"
-BATCH_SIZE = 16
-NUM_EPOCHS = 3
-EVAL_SAMPLES = 500
+# ── Configuration ──────────────────────────────────────────────────────────────
+DB_PATH       = "pmc_cases.db"                      # Must be uploaded to Colab
+MODEL_NAME    = "pritamdeka/S-PubMedBert-MS-MARCO"  # 768-dim medical bi-encoder
+OUTPUT_DIR    = "./finetuned-pubmedbert"
+BATCH_SIZE    = 16          # Increase to 32 on A100
+NUM_EPOCHS    = 3
+EVAL_SAMPLES  = 500
+WARMUP_RATIO  = 0.1
+
 
 def load_data_from_db():
-    logger.info(f"Connecting to {DB_PATH}...")
+    """Load PMC-Patients ground truth pairs from SQLite database."""
+    logger.info(f"Connecting to database: {DB_PATH}")
     conn = sqlite3.connect(DB_PATH)
-    
-    # We only need rows that have similar_patients ground truth
+
+    # Load cases with ground truth similarity labels
     rows = conn.execute(
         "SELECT patient_uid, text, similar_patients FROM cases WHERE similar_patients IS NOT NULL"
     ).fetchall()
-    
-    # Create a quick lookup dictionary for texts
+
+    # Build a fast UID → text lookup
     logger.info("Building text lookup dictionary...")
     text_lookup = {}
-    
-    # Also fetch all IDs and texts to resolve positives
-    all_rows = conn.execute("SELECT patient_uid, text FROM cases").fetchall()
-    for uid, text in all_rows:
+    for uid, text in conn.execute("SELECT patient_uid, text FROM cases").fetchall():
         text_lookup[uid] = text
 
-    logger.info(f"Loaded {len(text_lookup)} total cases. Found {len(rows)} cases with ground truth.")
+    logger.info(f"Total cases: {len(text_lookup):,}  |  Cases with ground truth: {len(rows):,}")
 
-    train_examples = []
-    eval_queries = {}
-    eval_corpus = {}
-    eval_relevant_docs = {}
-
+    # Split into train/eval
     random.shuffle(rows)
-    eval_rows = rows[:EVAL_SAMPLES]
+    eval_rows  = rows[:EVAL_SAMPLES]
     train_rows = rows[EVAL_SAMPLES:]
 
-    # Build Training Examples
-    logger.info("Building Training Pairs (Positive Pairs for Contrastive Loss)...")
+    # ── Build Training Pairs ──────────────────────────────────────────────────
+    # MultipleNegativesRankingLoss expects (anchor, positive) pairs.
+    # The batch itself provides hard in-batch negatives automatically.
+    anchors, positives = [], []
     for uid, text, sim_json in train_rows:
         try:
             similarities = json.loads(sim_json)
         except Exception:
             continue
-            
         for sim_uid, score in similarities.items():
-            if score >= 1 and sim_uid in text_lookup:
-                pos_text = text_lookup[sim_uid]
-                # We use MultipleNegativesRankingLoss, so we only need positive pairs.
-                # In-batch negatives are automatically used.
-                train_examples.append(InputExample(texts=[text, pos_text]))
+            if score >= 1 and sim_uid in text_lookup:   # rel=1 or rel=2 → positive
+                anchors.append(text)
+                positives.append(text_lookup[sim_uid])
 
-    # Build Eval Sets
-    logger.info("Building Evaluation Set...")
+    logger.info(f"Training pairs built: {len(anchors):,}")
+
+    # ── Build Evaluation Set ──────────────────────────────────────────────────
+    eval_queries, eval_corpus, eval_relevant_docs = {}, {}, {}
     for uid, text, sim_json in eval_rows:
         try:
             similarities = json.loads(sim_json)
         except Exception:
             continue
-            
         eval_queries[uid] = text
         relevant = set()
         for sim_uid, score in similarities.items():
             if score >= 1 and sim_uid in text_lookup:
                 relevant.add(sim_uid)
                 eval_corpus[sim_uid] = text_lookup[sim_uid]
-                
         if relevant:
             eval_relevant_docs[uid] = relevant
-            
-    # Add some random negatives to the eval corpus to make it realistic
+
+    # Add random negatives to eval corpus for realistic evaluation difficulty
     all_uids = list(text_lookup.keys())
     for _ in range(2000):
         rand_uid = random.choice(all_uids)
@@ -98,57 +101,89 @@ def load_data_from_db():
             eval_corpus[rand_uid] = text_lookup[rand_uid]
 
     conn.close()
-    
-    logger.info(f"Total Training Pairs: {len(train_examples)}")
-    return train_examples, eval_queries, eval_corpus, eval_relevant_docs
+
+    # Convert to HuggingFace Dataset (required by SentenceTransformerTrainer)
+    train_dataset = Dataset.from_dict({"anchor": anchors, "positive": positives})
+    logger.info(f"Train dataset: {len(train_dataset)} rows  |  Eval queries: {len(eval_queries)}")
+
+    return train_dataset, eval_queries, eval_corpus, eval_relevant_docs
+
 
 def main():
-    logger.info("Loading Data...")
-    train_examples, eval_queries, eval_corpus, eval_relevant_docs = load_data_from_db()
+    # ── 1. Load Data ──────────────────────────────────────────────────────────
+    train_dataset, eval_queries, eval_corpus, eval_relevant_docs = load_data_from_db()
 
-    if not train_examples:
-        logger.error("No training data found. Make sure the database has 'similar_patients' data.")
+    if len(train_dataset) == 0:
+        logger.error("No training data found. Check that similar_patients column is populated.")
         return
 
-    logger.info(f"Loading Base Model: {MODEL_NAME}")
-    # Load the base model
+    # ── 2. Load Base Model ────────────────────────────────────────────────────
+    logger.info(f"Loading base model: {MODEL_NAME}")
     model = SentenceTransformer(MODEL_NAME)
 
-    # Dataloader
-    train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=BATCH_SIZE)
-    
-    # Loss Function: Contrastive Softmax Loss (InfoNCE)
-    # This exactly matches equation (7) Ldense(theta) in the base paper.
-    train_loss = losses.MultipleNegativesRankingLoss(model=model)
+    # ── 3. Loss Function ──────────────────────────────────────────────────────
+    # InfoNCE / MultipleNegativesRankingLoss = matches eq.(7) Ldense(θ) in base paper
+    loss = MultipleNegativesRankingLoss(model)
 
-    # Evaluator
+    # ── 4. Evaluator ─────────────────────────────────────────────────────────
     evaluator = InformationRetrievalEvaluator(
         queries=eval_queries,
         corpus=eval_corpus,
         relevant_docs=eval_relevant_docs,
-        name='pmc-dev',
+        name="pmc-dev",
         mrr_at_k=[10],
         ndcg_at_k=[10],
         accuracy_at_k=[1, 10],
-        show_progress_bar=True
+        show_progress_bar=True,
     )
 
-    # Warmup
-    warmup_steps = math.ceil(len(train_dataloader) * NUM_EPOCHS * 0.1)
-    
-    logger.info("Starting Fine-Tuning Loop...")
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        evaluator=evaluator,
-        epochs=NUM_EPOCHS,
-        evaluation_steps=500,
+    # ── 5. Training Arguments ─────────────────────────────────────────────────
+    total_steps = (len(train_dataset) // BATCH_SIZE) * NUM_EPOCHS
+    warmup_steps = int(total_steps * WARMUP_RATIO)
+
+    args = SentenceTransformerTrainingArguments(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=NUM_EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
         warmup_steps=warmup_steps,
-        output_path=OUTPUT_DIR,
-        use_amp=True, # Automatic Mixed Precision (very fast on Colab T4/A100)
-        show_progress_bar=True
+        fp16=True,                        # Mixed precision — essential on T4/A100
+        bf16=False,
+        evaluation_strategy="steps",
+        eval_steps=500,
+        save_strategy="steps",
+        save_steps=500,
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        logging_steps=100,
+        run_name="clinsight-pubmedbert-finetuning",
     )
-    
-    logger.info(f"Fine-tuning complete! Model saved to {OUTPUT_DIR}")
+
+    # ── 6. Train ──────────────────────────────────────────────────────────────
+    trainer = SentenceTransformerTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset,
+        loss=loss,
+        evaluator=evaluator,
+    )
+
+    logger.info("=" * 60)
+    logger.info("Starting Fine-Tuning — S-PubMedBert on PMC-Patients")
+    logger.info(f"  Training pairs  : {len(train_dataset):,}")
+    logger.info(f"  Epochs          : {NUM_EPOCHS}")
+    logger.info(f"  Batch size      : {BATCH_SIZE}")
+    logger.info(f"  Total steps     : {total_steps:,}")
+    logger.info(f"  Warmup steps    : {warmup_steps:,}")
+    logger.info("=" * 60)
+
+    trainer.train()
+
+    # ── 7. Save Final Model ───────────────────────────────────────────────────
+    model.save_pretrained(OUTPUT_DIR)
+    logger.info(f"\n✅ Fine-tuning complete! Model saved to: {OUTPUT_DIR}")
+    logger.info("Download the 'finetuned-pubmedbert' folder and place it in your backend directory.")
+    logger.info("Then update MODEL_NAME in incremental_indexer.py to point to this local path.")
+
 
 if __name__ == "__main__":
     main()
