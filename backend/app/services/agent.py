@@ -165,28 +165,32 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                     text_to_uid[text] = uid
                         
                 if candidate_cases:
-                    # Skip ColBERT (too slow on CPU) — go directly to Cross-Encoder precision reranking
-                    # RRF top-20 → Cross-Encoder: Best accuracy/speed tradeoff
-                    pre_rerank = candidate_cases[:20]
+                    # E1: ColBERTv2 Late Interaction Reranking (MaxSim) — ARCHITECTURAL NOVELTY
+                    if colbert_reranker is not None:
+                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: ColBERTv2 Late Interaction Reranking (N={len(candidate_cases)}, MaxSim)...'})}\n\n"
+                        colbert_results = colbert_reranker.rerank(search_query, candidate_cases, top_k=20)
+                        bi_filtered_cases = [doc for doc, score in colbert_results]
+                    else:
+                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: Bi-Encoder Fallback (ColBERT unavailable, N={len(candidate_cases)})...'})}\n\n"
+                        bi_filtered_cases = candidate_cases[:20]
 
+                    # E2: Cross-Encoder Precision Reranking — ARCHITECTURAL NOVELTY
                     if cross_encoder is not None:
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E2: Cross-Encoder Precision Reranking top {len(pre_rerank)} candidates...'})}\n\n"
-                        cross_inp = [[search_query, doc] for doc in pre_rerank]
+                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E2: Cross-Encoder Precision Reranking top {len(bi_filtered_cases)} candidates (ms-marco)...'})}\n\n"
+                        cross_inp = [[search_query, doc] for doc in bi_filtered_cases]
                         scores = cross_encoder.predict(cross_inp)
-                        scored_cases = list(zip(pre_rerank, scores))
+                        scored_cases = list(zip(bi_filtered_cases, scores))
                         scored_cases.sort(key=lambda x: x[1], reverse=True)
                         matched_cases = [doc for doc, score in scored_cases[:10]]
                     else:
-                        matched_cases = pre_rerank[:10]
+                        matched_cases = bi_filtered_cases[:10]
 
                     # ── Calibrated Confidence using PubMedBert Cosine Similarity ──
-                    # PubMedBert cosine sim is in [0, 1] for unit vectors (dot product of normalized)
-                    # 0.85+ = very high clinical similarity, 0.60 = moderate, below = weak
-                    # Map to confidence: sigmoid-like scaling to 60–99% range
-                    raw_sim = float(top_faiss_score)  # top-1 cosine similarity
-                    # Clamp to [0.5, 1.0] range (realistic clinical similarity range)
+                    # PubMedBert cosine sim is in [0,1] for normalized vectors
+                    # 0.85+ = very high clinical similarity, 0.60 = moderate
+                    # Scale: 0.5 sim → 60%, 0.75 sim → 79%, 0.85 sim → 92%, 1.0 → 99%
+                    raw_sim = float(top_faiss_score)
                     raw_sim = max(0.5, min(1.0, raw_sim))
-                    # Scale: 0.5 sim → 60% confidence, 0.85 sim → 92%, 1.0 → 99%
                     confidence_pct = int(60 + (raw_sim - 0.5) * (39 / 0.5))
                     confidence_pct = min(99, max(60, confidence_pct))
 
