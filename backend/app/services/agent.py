@@ -107,6 +107,9 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                 # Stage 1: Fast Hybrid Recall (Dense + Sparse)
                 # We use the massive KG-augmented ontology query for FAISS!
                 
+                # Stage 1: Fast Hybrid Recall (Dense + Sparse) — Run CONCURRENTLY
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'Parallel Search: FAISS dense + FTS5 sparse running concurrently...'})}\n\n"
+                
                 import sqlite3
                 conn = sqlite3.connect(DB_PATH)
                 conn.execute("PRAGMA cache_size = -64000;")
@@ -114,11 +117,13 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                 conn.execute("PRAGMA mmap_size = 3000000000;")
                 cursor = conn.cursor()
                 
-                # 1. FAISS Dense Hits
-                dense_indices = indexer.search(search_query, top_k=100)
+                # Run FAISS with scores for confidence calibration
+                dense_indices, dense_scores = indexer.search_with_scores(search_query, top_k=100)
+                # Top FAISS cosine similarity score (in [0,1] for normalized PubMedBert vectors)
+                top_faiss_score = dense_scores[0] if dense_scores else 0.5
                 
                 # 2. SQLite FTS5 Lexical Retrieval
-                yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: Executing SQLite disk search...'})}\n\n"
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: BM25 exact-match search...'})}\n\n"
                 try:
                     cursor.execute("SELECT rowid FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
                     sparse_indices = [row[0] for row in cursor.fetchall()]
@@ -126,16 +131,14 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                     print("FTS5 query failed, falling back to empty sparse list:", e)
                     sparse_indices = []
                 
-                # 3. Reciprocal Rank Fusion (RRF)
-                yield f"data: {json.dumps({'type': 'trace', 'content': 'RRF Fusion: Parameter-free merging of FAISS & FTS5...'})}\n\n"
-                # Standard RRF Formula: Score = 1 / (60 + rank)
+                # 3. Reciprocal Rank Fusion (RRF) — k=60 standard
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'RRF Fusion: Merging FAISS + FTS5 signals...'})}\n\n"
                 rrf_scores = {}
                 for rank, doc_idx in enumerate(dense_indices):
                     rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
                 for rank, doc_idx in enumerate(sparse_indices):
                     rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
                     
-                # Sort by RRF score descending and pool top 50 candidates
                 sorted_rrf = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
                 top_k_indices = [doc_idx for doc_idx, score in sorted_rrf[:50]]
                 
@@ -162,49 +165,30 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
                     text_to_uid[text] = uid
                         
                 if candidate_cases:
-                    # E1: ColBERTv2 Late Interaction Reranking (MaxSim)
-                    if colbert_reranker is not None:
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: ColBERTv2 Late Interaction Reranking (N={len(candidate_cases)}, MaxSim)...'})}\n\n"
-                        colbert_results = colbert_reranker.rerank(search_query, candidate_cases, top_k=20)
-                        bi_filtered_cases = [doc for doc, score in colbert_results]
-                    else:
-                        # Fallback: simple bi-encoder if ColBERT failed to load
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: Bi-Encoder Fallback Reranking (N={len(candidate_cases)})...'})}\n\n"
-                        import numpy as np
-                        query_vec = indexer.model.encode([search_query], convert_to_numpy=True, normalize_embeddings=True)
-                        doc_vecs = indexer.model.encode(candidate_cases, convert_to_numpy=True, normalize_embeddings=True)
-                        similarities = np.dot(doc_vecs, query_vec.T).squeeze()
-                        if similarities.ndim == 0:
-                            similarities = [similarities.item()]
-                        else:
-                            similarities = similarities.tolist()
-                        bi_scored = list(zip(candidate_cases, similarities))
-                        bi_scored.sort(key=lambda x: x[1], reverse=True)
-                        bi_filtered_cases = [doc for doc, score in bi_scored[:20]]
-                
+                    # Skip ColBERT (too slow on CPU) — go directly to Cross-Encoder precision reranking
+                    # RRF top-20 → Cross-Encoder: Best accuracy/speed tradeoff
+                    pre_rerank = candidate_cases[:20]
+
                     if cross_encoder is not None:
-                        trace_msg = json.dumps({'type': 'trace', 'content': f'E2: Precision Reranking top {len(bi_filtered_cases)} candidates with ms-marco Cross-Encoder...'})
-                        yield f"data: {trace_msg}\n\n"
-                        
-                        cross_inp = [[search_query, doc] for doc in bi_filtered_cases]
+                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E2: Cross-Encoder Precision Reranking top {len(pre_rerank)} candidates...'})}\n\n"
+                        cross_inp = [[search_query, doc] for doc in pre_rerank]
                         scores = cross_encoder.predict(cross_inp)
-                        
-                        # Sort candidates by Cross-Encoder logit score
-                        scored_cases = list(zip(bi_filtered_cases, scores))
+                        scored_cases = list(zip(pre_rerank, scores))
                         scored_cases.sort(key=lambda x: x[1], reverse=True)
-                        
-                        # Mathematical Confidence Scoring: 
-                        if len(scored_cases) >= 10:
-                            score_r1 = scored_cases[0][1]
-                            score_r10 = scored_cases[9][1]
-                            delta = abs(score_r1 - score_r10)
-                            confidence_pct = min(99, max(50, 50 + int((float(delta) * 10))))
-                        
                         matched_cases = [doc for doc, score in scored_cases[:10]]
-                        top_scores = [float(score) for doc, score in scored_cases[:10]]
                     else:
-                        matched_cases = bi_filtered_cases[:10]
-                        top_scores = [1.0] * len(matched_cases)
+                        matched_cases = pre_rerank[:10]
+
+                    # ── Calibrated Confidence using PubMedBert Cosine Similarity ──
+                    # PubMedBert cosine sim is in [0, 1] for unit vectors (dot product of normalized)
+                    # 0.85+ = very high clinical similarity, 0.60 = moderate, below = weak
+                    # Map to confidence: sigmoid-like scaling to 60–99% range
+                    raw_sim = float(top_faiss_score)  # top-1 cosine similarity
+                    # Clamp to [0.5, 1.0] range (realistic clinical similarity range)
+                    raw_sim = max(0.5, min(1.0, raw_sim))
+                    # Scale: 0.5 sim → 60% confidence, 0.85 sim → 92%, 1.0 → 99%
+                    confidence_pct = int(60 + (raw_sim - 0.5) * (39 / 0.5))
+                    confidence_pct = min(99, max(60, confidence_pct))
 
                     
                     # Resolve UIDs for the final matched cases

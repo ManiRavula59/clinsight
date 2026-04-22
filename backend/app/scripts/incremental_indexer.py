@@ -3,7 +3,7 @@ import faiss
 import sqlite3
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from typing import List
+from typing import List, Tuple
 from functools import lru_cache
 
 # Shared DB path — used by indexer and agent.py
@@ -79,16 +79,31 @@ class IncrementalFaissIndexer:
 
     # ── Dense retrieval (FAISS) ───────────────────────────────────────────
 
-    @lru_cache(maxsize=128)
-    def search(self, query: str, top_k: int = 100) -> List[int]:
-        """Dense semantic search via FAISS HNSW. Returns up to top_k integer IDs."""
-        if not self.index or self.index.ntotal == 0:
-            return []
-        query_vec = self.model.encode(
+    @lru_cache(maxsize=256)
+    def _encode_query(self, query: str) -> np.ndarray:
+        """Cache the expensive PubMedBert encoding step separately."""
+        return self.model.encode(
             [query], convert_to_numpy=True, normalize_embeddings=True
         )
+
+    @lru_cache(maxsize=256)
+    def search(self, query: str, top_k: int = 100) -> List[int]:
+        """Dense semantic search via FAISS. Returns up to top_k integer IDs."""
+        if not self.index or self.index.ntotal == 0:
+            return []
+        query_vec = self._encode_query(query)
         _, indices = self.index.search(query_vec, top_k)
         return [int(i) for i in indices[0] if i >= 0]
+
+    @lru_cache(maxsize=256)
+    def search_with_scores(self, query: str, top_k: int = 100) -> Tuple[List[int], List[float]]:
+        """Dense search returning (indices, cosine_similarity_scores). Used for calibrated confidence."""
+        if not self.index or self.index.ntotal == 0:
+            return [], []
+        query_vec = self._encode_query(query)
+        scores, indices = self.index.search(query_vec, top_k)
+        valid = [(int(i), float(s)) for i, s in zip(indices[0], scores[0]) if i >= 0]
+        return [v[0] for v in valid], [v[1] for v in valid]
 
     # ── Sparse retrieval (SQLite FTS5 / BM25) ────────────────────────────
 

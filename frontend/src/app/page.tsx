@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Activity, Brain, User, Sparkles, BarChart2, Plus, Network, X, Database, ShieldCheck, Microscope, ThumbsUp, ThumbsDown, CheckCircle2, FlaskConical, Paperclip } from "lucide-react";
+import { Send, Activity, Brain, User, Sparkles, BarChart2, Plus, Network, X, Database, ShieldCheck, Microscope, ThumbsUp, ThumbsDown, CheckCircle2, FlaskConical, Paperclip, Phone, AlertTriangle, BellRing } from "lucide-react";
 import { BackgroundDiffusion } from "@/components/ui/BackgroundDiffusion";
 import { SquircleCard } from "@/components/ui/SquircleCard";
 import { ArchitectureModal } from "@/components/ui/ArchitectureModal";
@@ -27,9 +27,31 @@ export default function Home() {
   const [isWorkflowModalOpen, setIsWorkflowModalOpen] = useState(false);
   const [isMetricsModalOpen, setIsMetricsModalOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [followupPanels, setFollowupPanels] = useState<Record<string, boolean>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const metricsBtnRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Detect clinical abnormalities from AI response text
+  const detectAbnormalities = (text: string) => {
+    const rules = [
+      { pattern: /chest pain|chest pressure|angina/i, label: "Chest Pain", severity: "critical" },
+      { pattern: /dyspnea|shortness of breath|breathlessness/i, label: "Dyspnea", severity: "critical" },
+      { pattern: /tachycardia|heart rate >100|rapid pulse/i, label: "Tachycardia", severity: "high" },
+      { pattern: /hypotension|bp.*<90|low blood pressure/i, label: "Hypotension", severity: "critical" },
+      { pattern: /fever|temperature.*>38|pyrexia/i, label: "Fever", severity: "high" },
+      { pattern: /edema|swelling|bilateral.*leg/i, label: "Edema", severity: "moderate" },
+      { pattern: /syncope|loss of consciousness|faint/i, label: "Syncope", severity: "critical" },
+      { pattern: /bleeding|hemorrhage|hematoma/i, label: "Bleeding Risk", severity: "critical" },
+      { pattern: /confusion|altered mental|disoriented/i, label: "Altered Mentation", severity: "critical" },
+      { pattern: /nausea|vomiting|emesis/i, label: "GI Symptoms", severity: "moderate" },
+    ];
+    return rules.filter(r => r.pattern.test(text));
+  };
+
+  const toggleFollowupPanel = (msgId: string) => {
+    setFollowupPanels(prev => ({ ...prev, [msgId]: !prev[msgId] }));
+  };
 
   const startNewChat = () => {
     setMessages([]);
@@ -254,9 +276,10 @@ export default function Home() {
           ) : (
             messages.map((msg) => (
               <div key={msg.id} className={cn(
-                "max-w-4xl mx-auto flex w-full",
-                msg.role === "user" ? "justify-end" : "justify-start"
+                "max-w-4xl mx-auto flex w-full flex-col",
+                msg.role === "user" ? "items-end" : "items-start"
               )}>
+                <div className={cn("flex w-full", msg.role === "user" ? "justify-end" : "justify-start")}>
 
                 {msg.role === "assistant" && (
                   <div className="flex-shrink-0 w-8 h-8 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center mr-4 mt-2">
@@ -265,7 +288,7 @@ export default function Home() {
                 )}
 
                 <SquircleCard
-                  dynamicScaling={!isLoading} // Restored dynamic hover, but strictly disabled during live generation to prevent parsing jitter
+                  dynamicScaling={!isLoading}
                   className={cn(
                     "max-w-[85%] relative overflow-hidden",
                     msg.role === "user"
@@ -273,7 +296,6 @@ export default function Home() {
                       : "bg-white/90 dark:bg-black/90 mr-12"
                   )}
                 >
-                  {/* Traces mapping strictly with conditional checks to avoid map crashes */}
                   {msg.role === "assistant" && msg.traces && msg.traces.length > 0 && (
                     <div className="mb-4 space-y-1">
                       {msg.traces.map((trace, idx) => (
@@ -285,7 +307,6 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Render the Raw CrossEncoder Retrieved Cases in a Beautiful Accordion */}
                   {msg.role === "assistant" && msg.cases && msg.cases.length > 0 && (
                     <div className="mb-8 overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-500/5 to-cyan-500/5 border border-indigo-500/10 shadow-sm">
                       <div className="p-4 bg-indigo-500/5 border-b border-indigo-500/10 flex items-center gap-2">
@@ -319,24 +340,19 @@ export default function Home() {
                     <div className="space-y-6">
                       {msg.content.split(/(?=## )/).filter(Boolean).map((section, idx) => {
                         if (!section.trim().startsWith("## ")) {
-                          // If it's just raw text before any header or missing a header
                           return (
                             <div key={idx} className="prose prose-sm md:prose-base dark:prose-invert max-w-none prose-p:leading-relaxed">
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>{section}</ReactMarkdown>
                             </div>
                           );
                         }
-
-                        // It's a structured ## Header section
                         const lines = section.trim().split("\n");
                         const headerLine = lines[0].replace("##", "").trim();
                         const bodyContent = lines.slice(1).join("\n").trim();
-                        if (!bodyContent && !isLoading) return null; // hide empty sections unless still typing
-
+                        if (!bodyContent && !isLoading) return null;
                         let Icon = Brain;
                         if (headerLine.toLowerCase().includes("summary")) Icon = Activity;
                         if (headerLine.toLowerCase().includes("metrics")) Icon = BarChart2;
-
                         return (
                           <div key={idx} className="bg-white dark:bg-white/5 rounded-xl border border-black/5 dark:border-white/10 shadow-sm overflow-hidden">
                             <div className="p-4 bg-gray-50/50 dark:bg-white/[0.02] border-b border-black/5 dark:border-white/10 flex items-center gap-2">
@@ -374,6 +390,71 @@ export default function Home() {
                     </div>
                   )}
                 </SquircleCard>
+                </div>
+
+                {/* AI Follow-up Button + Abnormality Panel (assistant only, after content is ready) */}
+                {msg.role === "assistant" && msg.content && !isLoading && (
+                  <div className="ml-12 mt-2 mb-2 w-full max-w-[85%]">
+                    <button
+                      onClick={() => toggleFollowupPanel(msg.id)}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 hover:border-emerald-500/50 text-emerald-700 dark:text-emerald-400 text-sm font-medium transition-all hover:scale-[1.02] active:scale-[0.98] group"
+                    >
+                      <BellRing className="w-4 h-4 group-hover:animate-ping" />
+                      AI Post-Discharge Monitor
+                      {detectAbnormalities(msg.content).length > 0 && (
+                        <span className="ml-1 flex items-center gap-1 px-2 py-0.5 bg-red-500/15 text-red-600 dark:text-red-400 rounded-full text-xs font-bold">
+                          <AlertTriangle className="w-3 h-3" />
+                          {detectAbnormalities(msg.content).length} Alerts
+                        </span>
+                      )}
+                    </button>
+
+                    {followupPanels[msg.id] && (
+                      <div className="mt-2 rounded-2xl border border-emerald-500/20 bg-gradient-to-br from-emerald-500/5 to-teal-500/5 p-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Phone className="w-4 h-4 text-emerald-500" />
+                          <span className="font-semibold text-sm text-gray-800 dark:text-gray-200">Post-Discharge Monitoring Report</span>
+                        </div>
+
+                        {detectAbnormalities(msg.content).length > 0 ? (
+                          <>
+                            <p className="text-xs text-gray-500">The following clinical signals were detected in the AI analysis. These should be monitored during follow-up calls:</p>
+                            <div className="flex flex-wrap gap-2">
+                              {detectAbnormalities(msg.content).map((a, i) => (
+                                <span
+                                  key={i}
+                                  className={cn(
+                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border",
+                                    a.severity === "critical" && "bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-400",
+                                    a.severity === "high" && "bg-orange-500/10 border-orange-500/30 text-orange-700 dark:text-orange-400",
+                                    a.severity === "moderate" && "bg-yellow-500/10 border-yellow-500/30 text-yellow-700 dark:text-yellow-400",
+                                  )}
+                                >
+                                  <AlertTriangle className="w-3 h-3" />
+                                  {a.label}
+                                  <span className="opacity-60 text-[10px] uppercase">{a.severity}</span>
+                                </span>
+                              ))}
+                            </div>
+                            <div className="mt-2 p-3 rounded-xl bg-red-500/5 border border-red-500/10 text-xs text-red-700 dark:text-red-400">
+                              ⚠️ Trigger AI voice follow-up call to patient to verify these symptoms. If confirmed, escalate to the attending physician immediately.
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/10 text-xs text-emerald-700 dark:text-emerald-400">
+                            <CheckCircle2 className="w-4 h-4" />
+                            No clinical abnormalities detected in the AI analysis. Routine follow-up call recommended at 48h post-discharge.
+                          </div>
+                        )}
+
+                        <div className="pt-1 border-t border-black/5 dark:border-white/5 flex items-center gap-2">
+                          <Phone className="w-3.5 h-3.5 text-emerald-500" />
+                          <span className="text-xs text-gray-500">Twilio AI Voice Agent: Schedule automated follow-up call via the Patient Management panel.</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))
           )}
