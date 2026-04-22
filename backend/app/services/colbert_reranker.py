@@ -42,10 +42,17 @@ class ColBERTReranker:
     """
 
     def __init__(self, model_name: str = "pritamdeka/S-PubMedBert-MS-MARCO"):
-        print(f"[ColBERT] Loading tokenizer and model: {model_name}")
+        import os
+        # Use fine-tuned PubMedBert if available (same weights as FAISS encoder)
+        finetuned_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "finetuned-pubmedbert")
+        if os.path.exists(finetuned_path):
+            model_name = finetuned_path
+            print(f"[ColBERT] Loading FINE-TUNED PubMedBert from {finetuned_path}")
+        else:
+            print(f"[ColBERT] Loading base model: {model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
-        self.model.eval()  # Inference mode — no dropout
+        self.model.eval()
         print("[ColBERT] Late interaction reranker ready ✅")
 
     @torch.no_grad()

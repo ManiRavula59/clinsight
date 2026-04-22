@@ -1,182 +1,175 @@
 """
-Clinsight — PubMedBert Fine-Tuning (memory-efficient, T4, 12GB RAM)
-------------------------------------------------------------------
-Run in ONE Colab cell after uploading pmc_cases.db.
+Clinsight — Full Dataset Chunked Training
+==========================================
+Trains on ALL pairs by loading 8000 at a time.
+Upload pmc_cases.db to Drive, then run this.
+
+How it works:
+  - Reads 8000 training pairs from SQLite (using OFFSET)
+  - Trains 1 epoch on that chunk
+  - Moves to next 8000 pairs
+  - Repeats until entire dataset is covered
+  - Then does a second full pass (epoch 2)
+  - RAM never exceeds ~4GB
 """
-import sqlite3, json, logging, math, random, gc, warnings
-warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-logger = logging.getLogger(__name__)
 
-from sentence_transformers import (
-    SentenceTransformer,
-    SentenceTransformerTrainer,
-    SentenceTransformerTrainingArguments,
-)
-from sentence_transformers.losses import MultipleNegativesRankingLoss
-from sentence_transformers.evaluation import InformationRetrievalEvaluator
+# ================== MOUNT DRIVE ==================
+from google.colab import drive
+drive.mount('/content/drive')
+
+import sqlite3, json, logging, random, gc, os, torch
 from datasets import Dataset
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.sentence_transformer.losses import MultipleNegativesRankingLoss
+from sentence_transformers import SentenceTransformerTrainer, SentenceTransformerTrainingArguments
 
-# ── Hyperparameters (tuned for 12GB RAM / T4 16GB VRAM) ──────────────────────
-DB_PATH       = "pmc_cases.db"
-MODEL_NAME    = "pritamdeka/S-PubMedBert-MS-MARCO"
-OUTPUT_DIR    = "./finetuned-pubmedbert"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+torch.backends.cuda.matmul.allow_tf32 = True
 
-BATCH_SIZE    = 32          # Safe for 12GB RAM
-GRAD_ACCUM    = 2           # Effective batch = 64
-NUM_EPOCHS    = 3
-LEARNING_RATE = 2e-5
-WEIGHT_DECAY  = 0.01
-MAX_SEQ_LEN   = 128         # Halves tensor memory vs 256
-CHAR_LIMIT    = 800         # ~128 tokens worth of text
-MAX_PAIRS     = 50000       # Cap pairs to avoid OOM
-EVAL_STEPS    = 500
-TEST_SAMPLES  = 150
-VAL_SAMPLES   = 200
+# ================== CONFIG ==================
+DB_PATH    = "/content/drive/MyDrive/pmc_cases.db"
+MODEL_PATH = "/content/drive/MyDrive/finetuned-pubmedbert"
+OUTPUT_DIR = "/content/drive/MyDrive/finetuned-pubmedbert"
 
-# ── PASS 1: Scan ground truth, collect only needed UIDs ──────────────────────
-logger.info("Pass 1: Scanning ground truth for needed UIDs...")
+CHUNK_SIZE  = 8000    # Pairs per chunk (fits in 12GB RAM)
+TEXT_LEN    = 300
+FULL_PASSES = 3       # 3 full passes = 3 epochs over entire dataset
+BATCH_SIZE  = 16
+GRAD_ACCUM  = 2
+
+print("GPU:", torch.cuda.is_available())
+assert os.path.exists(DB_PATH), "DB not found!"
+
+# ================== COUNT TOTAL GROUND TRUTH ROWS ==================
 conn = sqlite3.connect(DB_PATH)
-
-rows = conn.execute(
-    "SELECT patient_uid, text, similar_patients FROM cases WHERE similar_patients IS NOT NULL"
-).fetchall()
-logger.info(f"Rows with ground truth: {len(rows):,}")
-
-random.shuffle(rows)
-test_rows  = rows[:TEST_SAMPLES]
-val_rows   = rows[TEST_SAMPLES:TEST_SAMPLES + VAL_SAMPLES]
-train_rows = rows[TEST_SAMPLES + VAL_SAMPLES:]
-
-# Only collect UIDs that appear as positives — NOT all 250k
-needed_uids = set()
-for uid, text, sim_json in rows:
-    needed_uids.add(uid)
-    try:
-        for sim_uid in json.loads(sim_json):
-            needed_uids.add(sim_uid)
-    except Exception:
-        pass
-logger.info(f"Needed UIDs: {len(needed_uids):,} (vs 250k total — saves ~6GB RAM)")
-
-# ── PASS 2: Load ONLY needed texts ──────────────────────────────────────────
-logger.info("Pass 2: Loading only needed texts...")
-text_lookup = {}
-cursor = conn.cursor()
-# SQLite IN clause has a 999-variable limit, so batch the query
-uid_list = list(needed_uids)
-for i in range(0, len(uid_list), 900):
-    batch = uid_list[i:i+900]
-    ph = ",".join("?" * len(batch))
-    cursor.execute(f"SELECT patient_uid, text FROM cases WHERE patient_uid IN ({ph})", batch)
-    for uid, text in cursor.fetchall():
-        text_lookup[uid] = text[:CHAR_LIMIT]
-
+total_rows = conn.execute("SELECT COUNT(*) FROM cases WHERE similar_patients != '{}'").fetchone()[0]
+logger.info(f"Total ground truth rows: {total_rows:,}")
 conn.close()
-del needed_uids, uid_list
-gc.collect()
-logger.info(f"Loaded {len(text_lookup):,} texts (memory-efficient)")
 
-# ── Build Training Pairs (capped) ────────────────────────────────────────────
-anchors, positives = [], []
-for uid, text, sim_json in train_rows:
-    if len(anchors) >= MAX_PAIRS:
-        break
-    try:
-        for sim_uid, score in json.loads(sim_json).items():
-            if score >= 1 and sim_uid in text_lookup and len(anchors) < MAX_PAIRS:
-                anchors.append(text[:CHAR_LIMIT])
-                positives.append(text_lookup[sim_uid])
-    except Exception:
-        pass
+# ================== LOAD MODEL (from previous training) ==================
+if os.path.exists(MODEL_PATH) and os.path.exists(os.path.join(MODEL_PATH, "config.json")):
+    logger.info(f"Loading fine-tuned model from: {MODEL_PATH}")
+    model = SentenceTransformer(MODEL_PATH, device="cuda" if torch.cuda.is_available() else "cpu")
+else:
+    logger.info("No fine-tuned model found — loading base PubMedBert")
+    model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO", device="cuda" if torch.cuda.is_available() else "cpu")
 
-logger.info(f"Training pairs: {len(anchors):,} (cap: {MAX_PAIRS:,})")
-train_dataset = Dataset.from_dict({"anchor": anchors, "positive": positives})
-del anchors, positives, train_rows
-gc.collect()
+model.max_seq_length = 128
 
-# ── Build Evaluators ──────────────────────────────────────────────────────────
-def build_evaluator(split_rows, name, neg_count=500):
-    queries, corpus, relevant_docs = {}, {}, {}
-    for uid, text, sim_json in split_rows:
-        try:
-            queries[uid] = text[:CHAR_LIMIT]
-            relevant = set()
-            for sim_uid, score in json.loads(sim_json).items():
-                if score >= 1 and sim_uid in text_lookup:
-                    relevant.add(sim_uid)
-                    corpus[sim_uid] = text_lookup[sim_uid]
-            if relevant:
-                relevant_docs[uid] = relevant
-        except Exception:
-            pass
-    sample_uids = random.sample(list(text_lookup.keys()), min(neg_count, len(text_lookup)))
-    for uid in sample_uids:
-        if uid not in corpus:
-            corpus[uid] = text_lookup[uid]
-    logger.info(f"  {name}: {len(queries)} queries | {len(corpus)} corpus")
-    return InformationRetrievalEvaluator(
-        queries=queries, corpus=corpus, relevant_docs=relevant_docs,
-        name=name, mrr_at_k=[10], ndcg_at_k=[10], show_progress_bar=True,
-    )
+# ================== CHUNKED TRAINING LOOP ==================
+chunk_id = 0
 
-val_evaluator  = build_evaluator(val_rows,  "val",  500)
-test_evaluator = build_evaluator(test_rows, "test", 500)
-del val_rows, test_rows, rows
-gc.collect()
+for full_pass in range(FULL_PASSES):
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  FULL PASS {full_pass + 1} / {FULL_PASSES}")
+    logger.info(f"{'='*60}")
 
-# ── Model + Loss ──────────────────────────────────────────────────────────────
-logger.info(f"Loading model: {MODEL_NAME}")
-model = SentenceTransformer(MODEL_NAME)
-model.max_seq_length = MAX_SEQ_LEN
-loss = MultipleNegativesRankingLoss(model)
+    offset = 0
 
-# ── Training Args ─────────────────────────────────────────────────────────────
-total_steps  = (len(train_dataset) // (BATCH_SIZE * GRAD_ACCUM)) * NUM_EPOCHS
-warmup_steps = int(total_steps * 0.1)
+    while offset < total_rows:
+        chunk_id += 1
+        logger.info(f"\n--- Chunk {chunk_id} | Rows {offset} to {offset + CHUNK_SIZE} ---")
 
-training_args = SentenceTransformerTrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=NUM_EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRAD_ACCUM,
-    learning_rate=LEARNING_RATE,
-    weight_decay=WEIGHT_DECAY,
-    warmup_steps=warmup_steps,
-    lr_scheduler_type="cosine",
-    fp16=True,
-    bf16=False,
-    eval_strategy="steps",
-    eval_steps=EVAL_STEPS,
-    save_strategy="steps",
-    save_steps=EVAL_STEPS,
-    save_total_limit=1,             # Keep only 1 checkpoint to save disk
-    load_best_model_at_end=True,
-    metric_for_best_model="val_ndcg@10",
-    greater_is_better=True,
-    logging_steps=100,
-    dataloader_num_workers=2,       # 2 workers, not 4 — saves RAM
-    dataloader_pin_memory=False,    # Disabled — saves ~1GB RAM
-)
+        # Open fresh connection per chunk
+        conn = sqlite3.connect(DB_PATH)
 
-logger.info("=" * 55)
-logger.info(f"  Train pairs  : {len(train_dataset):,}")
-logger.info(f"  Batch (eff.) : {BATCH_SIZE}x{GRAD_ACCUM} = {BATCH_SIZE*GRAD_ACCUM}")
-logger.info(f"  Steps        : {total_steps:,}")
-logger.info(f"  Max seq len  : {MAX_SEQ_LEN}")
-logger.info("=" * 55)
+        # Stream rows for this chunk only
+        pair_buf = []
+        cursor = conn.execute(
+            "SELECT id, patient_uid, text, similar_patients FROM cases "
+            "WHERE similar_patients != '{}' LIMIT ? OFFSET ?",
+            (CHUNK_SIZE * 3, offset)  # Read extra rows since not all have valid pairs
+        )
 
-# ── Train ─────────────────────────────────────────────────────────────────────
-trainer = SentenceTransformerTrainer(
-    model=model, args=training_args,
-    train_dataset=train_dataset, loss=loss, evaluator=val_evaluator,
-)
-trainer.train()
+        for rid, uid, txt, sj in cursor:
+            try:
+                for su, sc in json.loads(sj).items():
+                    if sc >= 1:
+                        pair_buf.append((txt[:TEXT_LEN], su))
+                        if len(pair_buf) >= CHUNK_SIZE:
+                            break
+            except:
+                pass
+            if len(pair_buf) >= CHUNK_SIZE:
+                break
 
-# ── Final honest test score ───────────────────────────────────────────────────
-logger.info("\nFinal test evaluation...")
-test_results = test_evaluator(model)
-logger.info(f"Test NDCG@10: {test_results:.4f}  (base paper BM25: ~0.27)")
+        if not pair_buf:
+            logger.info("No more pairs — moving to next pass")
+            conn.close()
+            break
 
-model.save_pretrained(OUTPUT_DIR)
-logger.info(f"\n✅ Done! Download '{OUTPUT_DIR}' from Files panel.")
+        # Fetch positive texts
+        uids = list(set(u for _, u in pair_buf))
+        pos_text = {}
+        for i in range(0, len(uids), 300):
+            b = uids[i:i+300]
+            for u, t in conn.execute(
+                f"SELECT patient_uid, text FROM cases WHERE patient_uid IN ({','.join('?'*len(b))})", b
+            ).fetchall():
+                pos_text[u] = t[:TEXT_LEN]
+
+        conn.close()
+        del uids
+
+        # Build final pairs
+        anchors, positives = [], []
+        for a, u in pair_buf:
+            if u in pos_text:
+                anchors.append(a)
+                positives.append(pos_text[u])
+
+        del pair_buf, pos_text
+        gc.collect()
+
+        if len(anchors) < 100:
+            logger.info(f"Too few pairs ({len(anchors)}) — skipping chunk")
+            offset += CHUNK_SIZE * 3
+            del anchors, positives
+            gc.collect()
+            continue
+
+        logger.info(f"Training on {len(anchors):,} pairs...")
+        ds = Dataset.from_dict({"anchor": anchors, "positive": positives}).shuffle(seed=chunk_id)
+        del anchors, positives
+        gc.collect()
+
+        # Train this chunk (1 epoch per chunk)
+        loss = MultipleNegativesRankingLoss(model)
+        steps_this_chunk = len(ds) // (BATCH_SIZE * GRAD_ACCUM)
+
+        args = SentenceTransformerTrainingArguments(
+            output_dir=OUTPUT_DIR,
+            num_train_epochs=1,
+            per_device_train_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=GRAD_ACCUM,
+            learning_rate=2e-5,
+            weight_decay=0.01,
+            warmup_steps=max(1, int(steps_this_chunk * 0.1)),
+            lr_scheduler_type="cosine",
+            fp16=True if torch.cuda.is_available() else False,
+            logging_steps=50,
+            save_strategy="no",
+            dataloader_num_workers=2,
+            dataloader_pin_memory=True,
+        )
+
+        trainer = SentenceTransformerTrainer(
+            model=model, args=args, train_dataset=ds, loss=loss,
+        )
+        trainer.train()
+
+        # Save after each chunk (to Drive — survives disconnects)
+        model.save_pretrained(OUTPUT_DIR)
+        logger.info(f"✅ Chunk {chunk_id} done — saved to Drive")
+
+        # Cleanup
+        del ds, loss, trainer, args
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Move offset
+        offset += CHUNK_SIZE * 3
+
+print(f"\n🎉 Full training complete! {chunk_id} chunks trained across {FULL_PASSES} passes.")
+print(f"Model saved at: {OUTPUT_DIR}")

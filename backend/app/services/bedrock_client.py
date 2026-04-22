@@ -29,7 +29,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 logger = logging.getLogger("clinsight.bedrock")
 
 _BEDROCK_API_KEY = os.getenv("AWS_BEDROCK_API_KEY", "")
-_BEDROCK_REGION  = "us-east-1"   # Only region with API key access confirmed
+_BEDROCK_REGION  = os.getenv("AWS_BEDROCK_REGION", "us-east-1")
 _MODEL_ID        = "anthropic.claude-3-haiku-20240307-v1:0"  # ✅ Tested & working
 
 

@@ -272,9 +272,25 @@ def get_final_top_k(
     candidate_uids = [uid for uid, _ in candidate_list]
     candidate_texts = [text for _, text in candidate_list]
 
-    # Stage 4: Return Hybrid candidates directly (Base Paper approach)
-    # The base paper then applies LLM Reranking on these top K. We just return the Hybrid Top K.
-    return candidate_uids[:k]
+    # Stage 4: ColBERT Rerank (→ top 20)
+    if colbert_reranker is not None:
+        colbert_results = colbert_reranker.rerank(query_text, candidate_texts, top_k=20)
+        text_to_uid = {text: uid for uid, text in candidate_list}
+        colbert_uids = [text_to_uid[t] for t, _ in colbert_results if t in text_to_uid]
+        colbert_texts = [t for t, _ in colbert_results if t in text_to_uid]
+    else:
+        colbert_uids = candidate_uids[:20]
+        colbert_texts = candidate_texts[:20]
+
+    # Stage 5: Cross-Encoder Rerank (→ top k)
+    if cross_encoder is not None and colbert_texts:
+        cross_inp = [[query_text, doc] for doc in colbert_texts]
+        scores = cross_encoder.predict(cross_inp)
+        scored = list(zip(colbert_uids, scores))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [uid for uid, _ in scored[:k]]
+
+    return colbert_uids[:k]
 
 
 # ──────────────────────────────────────────────────────────────────────────────

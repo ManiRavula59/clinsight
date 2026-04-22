@@ -29,6 +29,9 @@ backend/app/data/pmc_cases.db
 backend/app/data/bm25_tokens.jsonl
 backend/app/data/bm25_corpus.pkl
 backend/app/data/disease_index.faiss
+backend/app/data/disease_index.faiss.bak
+backend/app/data/finetuned-pubmedbert/
+backend/app/data/finetuned-cross-encoder/
 
 # ─── Runtime Session Data (auto-generated, not source code) ───────────────────
 backend/app/data/call_histories/

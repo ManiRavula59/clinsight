@@ -35,9 +35,16 @@ except Exception as e:
     print(f"Warning: Could not load ColBERT reranker: {e}")
     colbert_reranker = None
 
-# Instantiate Cross-Encoder for Stage E2 Precision Reranking
+# Instantiate Cross-Encoder for Stage E2 Precision Reranking (Fine-tuned on PMC-Patients)
 try:
-    cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    import os as _os
+    _ce_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "data", "finetuned-cross-encoder")
+    if _os.path.exists(_ce_path):
+        print(f"[CrossEncoder] Loading FINE-TUNED model from {_ce_path}")
+        cross_encoder = CrossEncoder(_ce_path)
+    else:
+        print("[CrossEncoder] Fine-tuned not found, using base ms-marco")
+        cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 except Exception as e:
     print(f"Warning: Could not load cross-encoder: {e}")
     cross_encoder = None

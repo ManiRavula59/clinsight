@@ -120,7 +120,7 @@ async def handle_twilio_voice(
         # Fallback TwiML so the call doesn't just hang up with "Application Error"
         fallback = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Aditi" language="en-IN">Namaskaram, small technical issue. Please stay on the line.</Say>
-    <Redirect>/api/v1/twilio/voice</Redirect>
+    <Say voice="Polly.Aditi" language="en-IN">Namaskaram, small technical issue. We will call you back later.</Say>
+    <Hangup/>
 </Response>""".strip()
         return HTMLResponse(content=fallback, media_type="application/xml")

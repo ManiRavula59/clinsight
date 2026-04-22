@@ -408,13 +408,20 @@ def run_batch_evaluation(num_queries: int = 500, seed: int = 42, output_path: st
 
     try:
         from app.services.colbert_reranker import ColBERTReranker
-        print("  ColBERT explicitly disabled for batch benchmarking to prevent macOS PyTorch deadlocks.")
-        colbert = None
+        print("  Loading ColBERT reranker...")
+        colbert = ColBERTReranker()
     except Exception as e:
+        print(f"  ColBERT load failed ({e})")
         colbert = None
 
     try:
-        cross_enc = CE("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        finetuned_ce = "app/data/finetuned-cross-encoder"
+        if os.path.exists(finetuned_ce):
+            print(f"  Loading FINE-TUNED Cross-Encoder from {finetuned_ce}")
+            cross_enc = CE(finetuned_ce)
+        else:
+            print("  Fine-tuned Cross-Encoder not found, using base model")
+            cross_enc = CE("cross-encoder/ms-marco-MiniLM-L-6-v2")
     except Exception as e:
         print(f"  Cross-encoder load failed ({e})")
         cross_enc = None

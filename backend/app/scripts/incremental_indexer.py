@@ -32,8 +32,14 @@ class IncrementalFaissIndexer:
         self.index_path = index_path
         self.db_path = db_path
 
-        # Medical-grade PubMedBert embedding model (768-dim, matches Colab-built index)
-        self.model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
+        # Fine-tuned PubMedBert (trained on PMC-Patients) — falls back to base if not found
+        finetuned_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "finetuned-pubmedbert")
+        if os.path.exists(finetuned_path):
+            print(f"[FAISS] Loading FINE-TUNED PubMedBert from {finetuned_path}")
+            self.model = SentenceTransformer(finetuned_path)
+        else:
+            print("[FAISS] Fine-tuned model not found, using base PubMedBert")
+            self.model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
         self.dimension = self.model.get_sentence_embedding_dimension()
 
         self.index = None
