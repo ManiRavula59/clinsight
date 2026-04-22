@@ -10,16 +10,12 @@ NVIDIA_MODEL    = "nvidia/nemotron-3-nano-30b-a3b:free"
 
 # Keys 1-3: Synchronous pipeline (Planner, NER, KG, Safety Guardian, Orchestrator)
 PRESCRIPTION_KEYS = [
-    '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',
-    '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',
-    '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',
+    '',
 ]
 
 # Keys 4-6: Streaming pipeline (RAG LLM Synthesis)
 RETRIEVAL_KEYS = [
-    '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',
-    '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',
-    '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',
+   
 ]
 
 class LLMManager:
