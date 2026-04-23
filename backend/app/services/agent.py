@@ -95,132 +95,147 @@ async def clinical_search_stream(messages: list) -> AsyncGenerator[str, None]:
             yield f"data: {json.dumps({'type': 'trace', 'content': 'Conversational follow-up detected. Bypassing RAG...'})}\n\n"
         else:
             # Step 2b: Clinical Query Improvement (NER & Negation)
-            yield f"data: {json.dumps({'type': 'trace', 'content': 'Clinical Parser: Extracting NER & removing negated terms...'})}\n\n"
-            improvement = query_improver.process(plan.search_refinements)
+            attempts = 0
+            max_attempts = 2
+            current_search_refinement = plan.search_refinements
             
-            # Step 2c: Knowledge Graph Structuring
-            yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Mapping to UMLS Ontology & Knowledge Graph...'})}\n\n"
-            kg = kg_structurer.build_graph(improvement.normalized_text)
-            
-            # Extract augmented search query from the Graph
-            search_query = kg.expanded_search_query if kg else improvement.normalized_text
-            if kg and kg.contraindications:
-                yield f"data: {json.dumps({'type': 'trace', 'content': f'⚠️ KG Detected Contraindications: {len(kg.contraindications)}'})}\n\n"
-            
-            # Step 3: Retrieval via Faiss
-            if indexer and indexer.index.ntotal > 0:
-                yield f"data: {json.dumps({'type': 'trace', 'content': f'Querying FAISS chunked index (n={indexer.index.ntotal})...'})}\n\n"
+            while attempts < max_attempts:
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'Clinical Parser: Processing query (Attempt {attempts + 1})...'})}\n\n"
+                improvement = query_improver.process(current_search_refinement)
                 
-                # Stage 1: Fast Hybrid Recall (Dense + Sparse)
-                # We use the massive KG-augmented ontology query for FAISS!
+                # Step 2c: Knowledge Graph Structuring
+                yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Mapping to UMLS Ontology & Knowledge Graph...'})}\n\n"
+                kg = kg_structurer.build_graph(improvement.normalized_text)
                 
-                # Stage 1: Fast Hybrid Recall (Dense + Sparse) — Run CONCURRENTLY
-                yield f"data: {json.dumps({'type': 'trace', 'content': 'Parallel Search: FAISS dense + FTS5 sparse running concurrently...'})}\n\n"
+                # Extract augmented search query from the Graph
+                search_query = kg.expanded_search_query if kg else improvement.normalized_text
+                if kg and kg.contraindications:
+                    yield f"data: {json.dumps({'type': 'trace', 'content': f'⚠️ KG Detected Contraindications: {len(kg.contraindications)}'})}\n\n"
                 
-                import sqlite3
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("PRAGMA cache_size = -64000;")
-                conn.execute("PRAGMA temp_store = MEMORY;")
-                conn.execute("PRAGMA mmap_size = 3000000000;")
-                cursor = conn.cursor()
-                
-                # Run FAISS with scores for confidence calibration
-                dense_indices, dense_scores = indexer.search_with_scores(search_query, top_k=100)
-                # Top FAISS cosine similarity score (in [0,1] for normalized PubMedBert vectors)
-                top_faiss_score = dense_scores[0] if dense_scores else 0.5
-                
-                # 2. SQLite FTS5 Lexical Retrieval
-                yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: BM25 exact-match search...'})}\n\n"
-                try:
-                    cursor.execute("SELECT rowid FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
-                    sparse_indices = [row[0] for row in cursor.fetchall()]
-                except Exception as e:
-                    print("FTS5 query failed, falling back to empty sparse list:", e)
-                    sparse_indices = []
-                
-                # 3. Reciprocal Rank Fusion (RRF) — k=60 standard
-                yield f"data: {json.dumps({'type': 'trace', 'content': 'RRF Fusion: Merging FAISS + FTS5 signals...'})}\n\n"
-                rrf_scores = {}
-                for rank, doc_idx in enumerate(dense_indices):
-                    rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
-                for rank, doc_idx in enumerate(sparse_indices):
-                    rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
+                # Step 3: Retrieval via Faiss
+                if indexer and indexer.index.ntotal > 0:
+                    yield f"data: {json.dumps({'type': 'trace', 'content': f'Querying FAISS chunked index (n={indexer.index.ntotal})...'})}\n\n"
                     
-                sorted_rrf = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-                top_k_indices = [doc_idx for doc_idx, score in sorted_rrf[:50]]
-                
-                # Rehydrate context from SQLite database
-                
-                # Pass integer indices to SQLite to fetch text AND patient_uid
-                placeholders = ','.join('?' for _ in top_k_indices)
-                cursor.execute(f"SELECT id, patient_uid, text FROM cases WHERE id IN ({placeholders})", tuple(int(i) for i in top_k_indices))
-                rows = cursor.fetchall()
-                
-                # Reorder the SQLite results to strictly match the mathematical RRF ranking
-                id_to_info = {row[0]: (row[1], row[2]) for row in rows}  # id → (uid, text)
-                candidate_cases = []
-                candidate_uids = []  # Track UIDs through the pipeline for metrics
-                for i in top_k_indices:
-                    info = id_to_info.get(int(i))
-                    if info:
-                        candidate_uids.append(info[0])
-                        candidate_cases.append(info[1])
-                
-                # Build text → uid mapping for tracking through reranking
-                text_to_uid = {}
-                for uid, text in zip(candidate_uids, candidate_cases):
-                    text_to_uid[text] = uid
+                    # Stage 1: Fast Hybrid Recall (Dense + Sparse) — Run CONCURRENTLY
+                    yield f"data: {json.dumps({'type': 'trace', 'content': 'Parallel Search: FAISS dense + FTS5 sparse running concurrently...'})}\n\n"
+                    
+                    import sqlite3
+                    conn = sqlite3.connect(DB_PATH)
+                    conn.execute("PRAGMA cache_size = -64000;")
+                    conn.execute("PRAGMA temp_store = MEMORY;")
+                    conn.execute("PRAGMA mmap_size = 3000000000;")
+                    cursor = conn.cursor()
+                    
+                    # Run FAISS with scores for confidence calibration
+                    dense_indices, dense_scores = indexer.search_with_scores(search_query, top_k=100)
+                    # Top FAISS cosine similarity score
+                    top_faiss_score = dense_scores[0] if dense_scores else 0.5
+                    
+                    # 2. SQLite FTS5 Lexical Retrieval
+                    yield f"data: {json.dumps({'type': 'trace', 'content': 'FTS5 Lexical Retrieval: BM25 exact-match search...'})}\n\n"
+                    try:
+                        cursor.execute("SELECT rowid FROM cases_fts WHERE text MATCH ? ORDER BY rank LIMIT 100", (improvement.fts5_query,))
+                        sparse_indices = [row[0] for row in cursor.fetchall()]
+                    except Exception as e:
+                        print("FTS5 query failed, falling back to empty sparse list:", e)
+                        sparse_indices = []
+                    
+                    # 3. Reciprocal Rank Fusion (RRF)
+                    yield f"data: {json.dumps({'type': 'trace', 'content': 'RRF Fusion: Merging FAISS + FTS5 signals...'})}\n\n"
+                    rrf_scores = {}
+                    for rank, doc_idx in enumerate(dense_indices):
+                        rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
+                    for rank, doc_idx in enumerate(sparse_indices):
+                        rrf_scores[doc_idx] = rrf_scores.get(doc_idx, 0.0) + (1.0 / (60 + rank))
                         
-                if candidate_cases:
-                    # E1: ColBERTv2 Late Interaction Reranking (MaxSim) — ARCHITECTURAL NOVELTY
-                    if colbert_reranker is not None:
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: ColBERTv2 Late Interaction Reranking (N={len(candidate_cases)}, MaxSim)...'})}\n\n"
-                        colbert_results = colbert_reranker.rerank(search_query, candidate_cases, top_k=20)
-                        bi_filtered_cases = [doc for doc, score in colbert_results]
-                    else:
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: Bi-Encoder Fallback (ColBERT unavailable, N={len(candidate_cases)})...'})}\n\n"
-                        bi_filtered_cases = candidate_cases[:20]
-
-                    # E2: Cross-Encoder Precision Reranking — ARCHITECTURAL NOVELTY
-                    if cross_encoder is not None:
-                        yield f"data: {json.dumps({'type': 'trace', 'content': f'E2: Cross-Encoder Precision Reranking top {len(bi_filtered_cases)} candidates (ms-marco)...'})}\n\n"
-                        cross_inp = [[search_query, doc] for doc in bi_filtered_cases]
-                        scores = cross_encoder.predict(cross_inp)
-                        scored_cases = list(zip(bi_filtered_cases, scores))
-                        scored_cases.sort(key=lambda x: x[1], reverse=True)
-                        matched_cases = [doc for doc, score in scored_cases[:10]]
-                    else:
-                        matched_cases = bi_filtered_cases[:10]
-
-                    # ── Calibrated Confidence using PubMedBert Cosine Similarity ──
-                    # PubMedBert cosine sim is in [0,1] for normalized vectors
-                    # 0.85+ = very high clinical similarity, 0.60 = moderate
-                    # Scale: 0.5 sim → 60%, 0.75 sim → 79%, 0.85 sim → 92%, 1.0 → 99%
-                    raw_sim = float(top_faiss_score)
-                    raw_sim = max(0.5, min(1.0, raw_sim))
-                    confidence_pct = int(60 + (raw_sim - 0.5) * (39 / 0.5))
-                    confidence_pct = min(99, max(60, confidence_pct))
-
+                    sorted_rrf = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+                    top_k_indices = [doc_idx for doc_idx, score in sorted_rrf[:50]]
                     
-                    # Resolve UIDs for the final matched cases
-                    matched_case_uids = [text_to_uid.get(text, '') for text in matched_cases]
+                    # Rehydrate context from SQLite
+                    placeholders = ','.join('?' for _ in top_k_indices)
+                    cursor.execute(f"SELECT id, patient_uid, text FROM cases WHERE id IN ({placeholders})", tuple(int(i) for i in top_k_indices))
+                    rows = cursor.fetchall()
+                    
+                    id_to_info = {row[0]: (row[1], row[2]) for row in rows}
+                    candidate_cases = []
+                    candidate_uids = []
+                    for i in top_k_indices:
+                        info = id_to_info.get(int(i))
+                        if info:
+                            candidate_uids.append(info[0])
+                            candidate_cases.append(info[1])
+                    
+                    text_to_uid = {}
+                    for uid, text in zip(candidate_uids, candidate_cases):
+                        text_to_uid[text] = uid
+                            
+                    if candidate_cases:
+                        # E1: ColBERTv2
+                        if colbert_reranker is not None:
+                            yield f"data: {json.dumps({'type': 'trace', 'content': f'E1: ColBERTv2 Late Interaction Reranking (N={len(candidate_cases)})...'})}\n\n"
+                            colbert_results = colbert_reranker.rerank(search_query, candidate_cases, top_k=20)
+                            bi_filtered_cases = [doc for doc, score in colbert_results]
+                        else:
+                            bi_filtered_cases = candidate_cases[:20]
+
+                        # E2: Cross-Encoder
+                        if cross_encoder is not None:
+                            yield f"data: {json.dumps({'type': 'trace', 'content': f'E2: Cross-Encoder Precision Reranking top {len(bi_filtered_cases)} candidates...'})}\n\n"
+                            cross_inp = [[search_query, doc] for doc in bi_filtered_cases]
+                            scores = cross_encoder.predict(cross_inp)
+                            scored_cases = list(zip(bi_filtered_cases, scores))
+                            scored_cases.sort(key=lambda x: x[1], reverse=True)
+                            matched_cases = [doc for doc, score in scored_cases[:10]]
+                        else:
+                            matched_cases = bi_filtered_cases[:10]
+
+                        # ── Calibrated Confidence ──
+                        raw_sim = float(top_faiss_score)
+                        raw_sim = max(0.5, min(1.0, raw_sim))
+                        confidence_pct = int(60 + (raw_sim - 0.5) * (39 / 0.5))
+                        confidence_pct = min(99, max(60, confidence_pct))
                         
-                    # F1: Knowledge Graph (KG) Validation Layer
-                    yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Validating Top matched entities against Query Knowledge Graph...'})}\n\n"
-                    query_entities = [ent.text.lower() for ent in improvement.entities]
+                        # Resolve UIDs
+                        matched_case_uids = [text_to_uid.get(text, '') for text in matched_cases]
+                            
+                        # F1: KG Validation
+                        yield f"data: {json.dumps({'type': 'trace', 'content': 'F1: Validating Top matched entities against Query Knowledge Graph...'})}\n\n"
+                        query_entities = [ent.text.lower() for ent in improvement.entities]
+                        
+                        validated_cases = []
+                        for case in matched_cases:
+                            case_lower = case.lower()
+                            overlap_count = sum(1 for q_ent in query_entities if q_ent in case_lower)
+                            overlap_ratio = overlap_count / max(len(query_entities), 1)
+                            validated_cases.append(case)
+                        
+                        retrieved_context = "\\n---\\n".join(validated_cases)
                     
-                    validated_cases = []
-                    for case in matched_cases:
-                        case_lower = case.lower()
-                        # Simple rule logic: Check if query entities exist in case text
-                        overlap_count = sum(1 for q_ent in query_entities if q_ent in case_lower)
-                        overlap_ratio = overlap_count / max(len(query_entities), 1)
-                        # We just log it for validation, in extreme prod we would filter it out
-                        validated_cases.append(case)
-                    
-                    retrieved_context = "\\n---\\n".join(validated_cases)
+                    conn.close()
+
+                # CHECK FOR RETRY
+                if confidence_pct >= 70 or attempts >= max_attempts - 1:
+                    break
                 
-                conn.close()  # Close SQLite connection after pipeline
+                # Perform Refinement
+                attempts += 1
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'⚠️ Confidence low ({confidence_pct}%). Attempting clinical query refinement (Retry 1)...'})}\n\n"
+                
+                refinement_prompt = f"""
+                You are a Clinical Search Expert. The following query resulted in low-confidence retrieval matches.
+                Original Query: {current_search_refinement}
+                
+                Suggest a more medically precise, expanded version of this query that focuses on pathognomonic symptoms, 
+                differential diagnoses, and key medical terminology to improve retrieval in a clinical case database.
+                Return ONLY the refined query text.
+                """
+                refiner = llm_manager.get_fallback_chain()
+                ref_msg = refiner.invoke([
+                    SystemMessage(content="You are a clinical expert refiner."),
+                    HumanMessage(content=refinement_prompt)
+                ])
+                current_search_refinement = ref_msg.content.strip()
+                yield f"data: {json.dumps({'type': 'trace', 'content': f'Refined Search Query: {current_search_refinement}'})}\n\n"
              # ── PPR Metrics: Load pre-computed offline benchmark + live confidence ──
         eval_k = 10
 

@@ -10,12 +10,16 @@ NVIDIA_MODEL    = "nvidia/nemotron-3-nano-30b-a3b:free"
 
 # Keys 1-3: Synchronous pipeline (Planner, NER, KG, Safety Guardian, Orchestrator)
 PRESCRIPTION_KEYS = [
-    '',
+    os.getenv('OPENROUTER_KEY_1'),
+    os.getenv('OPENROUTER_KEY_2'),
+    os.getenv('OPENROUTER_KEY_3'),
 ]
 
 # Keys 4-6: Streaming pipeline (RAG LLM Synthesis)
 RETRIEVAL_KEYS = [
-   
+    os.getenv('OPENROUTER_KEY_4'),
+    os.getenv('OPENROUTER_KEY_5'),
+    os.getenv('OPENROUTER_KEY_6'),
 ]
 
 class LLMManager:

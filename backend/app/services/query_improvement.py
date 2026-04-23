@@ -38,18 +38,39 @@ class QueryImprovementService:
         # Uses primary keys first, openrouter last
         self.llm = llm_manager.get_fallback_chain()
 
+    # Common English + medical stopwords to filter out of FTS5 queries
+    STOPWORDS = {
+        'a','an','the','is','was','were','are','be','been','being','have','has','had',
+        'do','does','did','will','would','shall','should','may','might','must','can','could',
+        'i','me','my','we','our','you','your','he','she','it','they','them','his','her','its',
+        'this','that','these','those','am','at','by','for','from','in','into','of','on','to',
+        'with','and','but','or','nor','not','no','so','if','then','than','too','very',
+        'about','after','before','between','during','through','above','below','up','down',
+        'out','off','over','under','again','further','once','here','there','when','where',
+        'why','how','all','each','every','both','few','more','most','other','some','such',
+        'only','own','same','just','also','now','patient','presented','admitted','history',
+        'diagnosed','reported','showed','revealed','performed','noted','found','developed',
+        'underwent','received','treated','case','year','old','male','female','man','woman',
+        'day','days','month','months','week','weeks','hospital','department','clinical',
+    }
+
     def _sanitize_for_fts5(self, text: str) -> str:
         """
-        Final safety layer to prevent SQLite FTS5 syntax errors.
-        Only allows alphanumeric characters and spaces.
+        Extracts meaningful medical keywords for FTS5 OR-based search.
+        Filters stopwords, keeps only clinical terms, uses OR logic.
         """
-        # Replace non-alphanumeric with space
+        # Strip non-alphanumeric
         cleaned = re.sub(r'[^a-zA-Z0-9\s]', ' ', text)
-        # Collapse multiple spaces
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        # Wrap each term in double quotes for exact keyword matching
-        words = cleaned.split()
-        return " ".join([f'"{w}"' for w in words])
+        # Filter stopwords and short words
+        words = [w for w in cleaned.lower().split() 
+                 if w not in self.STOPWORDS and len(w) >= 3 and not w.isdigit()]
+        # Take top 15 keywords max (prevents query explosion)
+        keywords = words[:15]
+        if not keywords:
+            return cleaned.split()[0] if cleaned else "case"
+        # Use OR logic so any keyword match counts
+        return " OR ".join(keywords)
 
     def _rule_normalize(self, text: str) -> str:
         """

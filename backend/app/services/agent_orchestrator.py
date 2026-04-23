@@ -294,7 +294,17 @@ def followup_setup_node(state: ClinsightState) -> Dict:
         return {"messages": [AIMessage(content=f"Scheduling error: {str(e)}")]}
 
 def chat_node(state: ClinsightState) -> Dict:
-    return {"messages": [AIMessage(content="I am your Clinical Master Assistant. Please upload a prescription, describe a patient case for retrieval, or ask for follow-up scheduling.")]}
+    """
+    Enhanced General Chat Agent to clarify doubts and answer questions.
+    """
+    sys_msg = SystemMessage(content=(
+        "You are the Clinsight General Assistant. You help clinicians clarify doubts about the system, "
+        "explain medical concepts in a general sense, and provide guidance on how to use Clinsight's "
+        "Retrieval, Safety, and Voice agents. Be professional, concise, and helpful."
+    ))
+    # Use the LLM to generate a real response from the message history
+    response = llm.invoke([sys_msg] + list(state["messages"]))
+    return {"messages": [response]}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ROUTING LOGIC
